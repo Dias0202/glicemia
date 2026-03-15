@@ -1,0 +1,6 @@
+python-telegram-bot==20.8
+supabase>=2.4.0
+groq==0.4.2
+python-dotenv==1.0.1
+pandas==2.2.1
+matplotlib==3.8.3
