@@ -47,4 +47,5 @@
 - [ ] Realizar testes de ponta a ponta pelo Telegram.
 
 ## Log de Erros e Impedimentos
-*(Nenhum erro registrado até o momento. Utilize esta seção para documentar exceções, falhas de API ou bugs lógicos encontrados durante o desenvolvimento).*
+- **[2026-03-15] Erro Groq 400 (model_decommissioned):** O modelo `llama3-8b-8192` foi descontinuado pela API. 
+  - *Resolução:* String do modelo atualizada para `llama-3.1-8b-instant` no arquivo `services/nlp_service.py`. Erro corrigido.
