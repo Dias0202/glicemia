@@ -31,13 +31,14 @@
 - [] ingestao da Tabela Brasileira de Composição de Alimentos como baixar e subir para o supabase
 
 ### [X] Fase 2: Desenvolvimento de Código (Back-end)
-- [X] Implementar `core/config.py` para gestão de variáveis de ambiente.
+- [X] Implementar `core/config.py`.
 - [X] Implementar `database/supabase_client.py`.
-- [X] Implementar `repositories/logs_repository.py` (Inserção de registros).
-- [X] Implementar `services/nlp_service.py` (Comunicação com Groq e extração de JSON).
-- [X] Implementar `services/calculator_service.py` (Cálculo da dose de insulina).
-- [X] Implementar `handlers/telegram_handlers.py` (Recepção de mensagens).
-- [X] Integrar fluxo completo em `main.py`.
+- [X] Implementar `repositories/logs_repository.py`.
+- [X] Implementar `repositories/user_repository.py` (CRUD de perfil e calculo de IMC).
+- [X] Implementar `services/nlp_service.py`.
+- [X] Implementar `services/calculator_service.py`.
+- [X] Refatorar `handlers/telegram_handlers.py` (Arquitetura orientada a State Machines e passos isolados).
+- [X] Integrar fluxo completo e ConversationHandlers em `main.py`.
 
 ### [ ] Fase 3: Deploy e Validação
 - [x] Configurar repositório no GitHub.

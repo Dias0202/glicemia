@@ -52,7 +52,7 @@ def extract_health_data(user_text: str) -> dict:
                     "content": user_text,
                 }
             ],
-            model="llama3-8b-8192", # Modelo otimizado para latência. Pode ser alterado para llama3-70b-8192.
+            model="llama-3.1-8b-instant",
             temperature=0.0,
             response_format={"type": "json_object"}
         )
