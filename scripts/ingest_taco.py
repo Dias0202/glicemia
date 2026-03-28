@@ -81,9 +81,10 @@ def run_ingestion(csv_path: str):
         logging.error(f"Erro durante a ingestão de dados: {e}")
 
 if __name__ == "__main__":
-    # Caminho absoluto fornecido do arquivo CSV
-    caminho_csv = r"C:\projetos\glycemic_bot\taco\tabelas\alimentos.csv"
-    
+    # Caminho relativo a partir da raiz do projeto
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    caminho_csv = os.path.join(project_root, "taco", "tabelas", "alimentos.csv")
+
     if not os.path.exists(caminho_csv):
         logging.error(f"O arquivo não foi encontrado no caminho especificado: {caminho_csv}")
     else:

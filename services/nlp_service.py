@@ -40,6 +40,7 @@ def extract_health_data(user_text: str) -> dict:
     """
     Processa a entrada de texto do usuário via API do Groq e retorna um dicionário extraído.
     """
+    response_content = None
     try:
         chat_completion = client.chat.completions.create(
             messages=[
@@ -56,10 +57,10 @@ def extract_health_data(user_text: str) -> dict:
             temperature=0.0,
             response_format={"type": "json_object"}
         )
-        
+
         response_content = chat_completion.choices[0].message.content
         return json.loads(response_content)
-        
+
     except json.JSONDecodeError as e:
         logging.error(f"Falha ao decodificar JSON retornado pelo Groq: {e} - Resposta: {response_content}")
         raise ValueError("Erro de formatação na resposta da IA.")

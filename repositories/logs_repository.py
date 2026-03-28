@@ -1,10 +1,11 @@
 # repositories/logs_repository.py
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Any, Optional, List
 from database.supabase_client import supabase_db
 import logging
 
 def insert_glycemic_log(
+    telegram_user_id: int,
     glucose_level: Optional[int] = None,
     carbs_ingested: Optional[float] = None,
     bolus_insulin: Optional[float] = None,
@@ -18,11 +19,11 @@ def insert_glycemic_log(
     """
     Insere um novo registro na tabela glycemic_logs no Supabase.
     """
-    # Define o timestamp atual no formato ISO 8601 (com fuso horário UTC) se não for fornecido
     if not timestamp:
         timestamp = datetime.now(timezone.utc).isoformat()
 
     data = {
+        "telegram_user_id": telegram_user_id,
         "timestamp": timestamp,
         "glucose_level": glucose_level,
         "carbs_ingested": carbs_ingested,
@@ -34,7 +35,6 @@ def insert_glycemic_log(
         "refeicao": refeicao
     }
 
-    # Remove chaves com valores None para enviar apenas dados preenchidos ao Supabase
     data_to_insert = {k: v for k, v in data.items() if v is not None}
 
     try:
@@ -43,3 +43,42 @@ def insert_glycemic_log(
     except Exception as e:
         logging.error(f"Erro ao inserir log glicêmico: {e}")
         raise e
+
+
+def get_recent_logs(telegram_user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Retorna os registros glicêmicos mais recentes do usuário.
+    """
+    try:
+        response = (
+            supabase_db.table("glycemic_logs")
+            .select("*")
+            .eq("telegram_user_id", telegram_user_id)
+            .order("timestamp", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return response.data if response.data else []
+    except Exception as e:
+        logging.error(f"Erro ao buscar logs recentes: {e}")
+        return []
+
+
+def get_logs_for_period(telegram_user_id: int, days: int = 7) -> List[Dict[str, Any]]:
+    """
+    Retorna os registros glicêmicos de um período (em dias) para geração de gráficos.
+    """
+    try:
+        start_date = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        response = (
+            supabase_db.table("glycemic_logs")
+            .select("*")
+            .eq("telegram_user_id", telegram_user_id)
+            .gte("timestamp", start_date)
+            .order("timestamp", desc=False)
+            .execute()
+        )
+        return response.data if response.data else []
+    except Exception as e:
+        logging.error(f"Erro ao buscar logs do período: {e}")
+        return []

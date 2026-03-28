@@ -1,0 +1,76 @@
+O Gemini disse
+Descrição Completa do Projeto: Sistema de Monitoramento e Predição Glicêmica
+
+O projeto consiste na arquitetura e desenvolvimento de um pipeline de dados e interface conversacional voltado para o monitoramento contínuo, cálculo de intervenções e futura predição de níveis glicêmicos.
+Objetivos do Projeto
+
+Objetivo de Curto Prazo (Coleta e Operação):
+Desenvolver uma interface de entrada de dados de baixo atrito via Telegram para registrar métricas glicêmicas, dados nutricionais e contexto fisiológico. O sistema deve automatizar o cálculo de carboidratos ingeridos via integração de APIs externas e aplicar fórmulas clínicas para recomendar a dosagem exata de insulina (bolus de alimentação e correção). A interface também deve fornecer análises visuais do histórico recente.
+
+Objetivo de Longo Prazo (Modelagem Preditiva):
+Construir um conjunto de dados longitudinal, estruturado e com alta granularidade temporal. Este dataset servirá como base para treinar algoritmos de Machine Learning (como XGBoost ou redes neurais recorrentes) capazes de prever a variabilidade da curva glicêmica em um horizonte de tempo futuro (t+n), identificando tendências de hipoglicemia ou hiperglicemia com base no contexto comportamental e histórico de dados.
+Variáveis a Serem Consideradas (Features)
+
+Para garantir que o modelo preditivo futuro tenha capacidade de generalização e alta precisão, a coleta de dados deve abranger múltiplas dimensões do seu metabolismo e rotina.
+
+1. Variáveis Dependentes (Target Futuro):
+
+    Glicemia Futura: Nível de glicose no sangue (mg/dL) projetado para intervalos subsequentes (ex: 1 hora ou 2 horas após o registro).
+
+    Tendência de Variação: Categórica (estável, em queda, em alta rápida).
+
+2. Variáveis Fisiológicas e Clínicas (Estado Atual):
+
+    Glicemia Medida: Valor absoluto em mg/dL no momento do registro.
+
+    Timestamp: Data e hora exatas da medição, fundamental para capturar o ciclo circadiano e a sensibilidade à insulina, que varia ao longo do dia.
+
+    Tipo de Medição: Contexto clínico da leitura (jejum, pré-prandial, pós-prandial, correção de madrugada).
+
+    Insulina Ativa (IOB - Insulin On Board): Cálculo estimado da insulina de doses anteriores que ainda está ativa na corrente sanguínea.
+
+3. Variáveis Nutricionais (Inputs Energéticos):
+
+    Alimento Consumido: Descrição em texto da refeição.
+
+    Carga de Carboidratos: Quantidade total de carboidratos (em gramas). Pode ser expandido futuramente para incluir proteínas e gorduras, que afetam a absorção da glicose tardiamente.
+
+4. Variáveis de Intervenção (Ações Tomadas):
+
+    Insulina Recomendada: Dose calculada pelo algoritmo em Unidades Internacionais (UI).
+
+    Insulina Aplicada: Dose efetivamente injetada (UI), permitindo ao modelo aprender sobre desvios da recomendação.
+
+5. Variáveis de Contexto (Moduladores Glicêmicos):
+
+    Atividade Física: Variável booleana indicando a ocorrência de exercício.
+
+    Intensidade e Duração: Categórica (leve, moderada, alta) e numérica (tempo em minutos). O exercício aumenta a sensibilidade à insulina.
+
+    Nível de Estresse: Escala numérica (ex: 1 a 5). O cortisol e a adrenalina liberados durante o estresse induzem resistência à insulina e picos de glicemia.
+
+Stack Tecnológica (100% Gratuita e Operacional 24/7)
+
+Para atender ao requisito de gratuidade contínua sem interrupções por inatividade (sleep mode), a arquitetura foge dos modelos PaaS tradicionais e utiliza infraestrutura Cloud nativa combinada com serviços gerenciados gratuitos.
+
+    Infraestrutura de Computação: Oracle Cloud Infrastructure (OCI) - Tier "Always Free".
+
+        Especificação: Instância de computação com arquitetura ARM (Ampere A1), oferecendo até 4 OCPUs e 24 GB de RAM. Este recurso é vitalício, não é desligado por inatividade e possui capacidade computacional superior à necessária para rodar o bot e, futuramente, inferências de modelos de Machine Learning.
+
+    Linguagem e Orquestração: Python 3.10+.
+
+        Justificativa: Linguagem unificada para a engenharia de dados, criação do bot e desenvolvimento analítico/ML.
+
+        Biblioteca do Bot: aiogram. Framework assíncrono para a API do Telegram, garantindo alta performance e não bloqueio de processos durante requisições de rede.
+
+    Banco de Dados Relacional: PostgreSQL via Supabase.
+
+        Especificação: O Supabase oferece um banco PostgreSQL gerenciado com 500 MB de armazenamento na camada gratuita. É altamente otimizado para séries temporais e dados estruturados, permitindo conexões diretas via psycopg2 ou SQLAlchemy.
+
+    Integração de Dados Nutricionais: Open Food Facts API.
+
+        Especificação: Banco de dados aberto e colaborativo. A API é 100% gratuita e permite buscar alimentos por nome ou código de barras, retornando a composição de macronutrientes necessária para automatizar o cálculo de carboidratos.
+
+    Visualização de Dados: Matplotlib e Seaborn (Python).
+
+        Especificação: Geração estática de gráficos de tendência e dispersão. As imagens são geradas em buffers de memória (io.BytesIO()) e enviadas diretamente via protocolo do Telegram, eliminando a necessidade de armazenamento local de arquivos no servidor.
