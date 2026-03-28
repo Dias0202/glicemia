@@ -1,200 +1,189 @@
 # handlers/telegram_handlers.py
+import json
 import logging
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ContextTypes, ConversationHandler, CommandHandler,
-    MessageHandler, filters
+    MessageHandler, CallbackQueryHandler, filters
 )
-from services.nlp_service import extract_health_data
 from services.calculator_service import calculate_total_dose
 from services.chart_service import generate_glucose_chart
-from services.voice_service import transcribe_voice
+from services.portion_service import parse_quantity, calculate_carbs_from_portion, format_portion_help
 from repositories.logs_repository import insert_glycemic_log, get_recent_logs, get_logs_for_period
 from repositories.user_repository import upsert_user_profile, get_user_profile
-from repositories.food_repository import search_food
+from repositories.food_repository import search_food, get_food_by_id
+from repositories.meal_repository import save_meal, get_saved_meals
 
 # --- ESTADOS DO ONBOARDING ---
-AGE, WEIGHT, HEIGHT, HBA1C, BASAL_DOSE, BASAL_TIME, ICR, CORRECTION_FACTOR, TARGET_GLUCOSE = range(9)
+(AGE, WEIGHT, HEIGHT, HBA1C, BASAL_DOSE, BASAL_TIME,
+ ICR, CORRECTION_FACTOR, TARGET_GLUCOSE) = range(9)
 
-# --- ESTADOS DO REGISTRO DIARIO ---
-GLUCOSE_STATE, FOOD_STATE, INSULIN_STATE = range(9, 12)
+# --- ESTADOS DO REGISTRO ---
+(REG_GLUCOSE, REG_FOOD_CHOICE, REG_FOOD_SEARCH, REG_FOOD_SELECT,
+ REG_FOOD_QTY, REG_FOOD_MORE, REG_MOOD, REG_EXERCISE,
+ REG_INSULIN, REG_SAVE_MEAL_CHOICE, REG_SAVE_MEAL_NAME,
+ REG_MEAL_SELECT) = range(9, 21)
 
-
-# =====================================================================
-# UTILIDADES
-# =====================================================================
-
-async def _get_text_from_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Extrai texto de uma mensagem de texto ou de voz."""
-    if update.message.voice:
-        processing = await update.message.reply_text("Transcrevendo audio...")
-        voice_file = await context.bot.get_file(update.message.voice.file_id)
-        audio_bytes = await voice_file.download_as_bytearray()
-        text = await transcribe_voice(audio_bytes)
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=processing.message_id,
-            text=f"Entendi: \"{text}\""
-        )
-        return text
-    return update.message.text
-
-
-def _format_dose_calculation(calc: dict, glucose: int) -> str:
-    """Formata o resultado do calculo de dose para exibicao."""
-    lines = []
-    lines.append("--- Calculo de Dose ---\n")
-
-    if calc["carbs_ingested"] > 0:
-        lines.append(
-            f"Bolus alimentar: {calc['carbs_ingested']}g / {calc['insulin_carb_ratio']} (ICR) "
-            f"= {calc['bolus_alimentar']} U"
-        )
-
-    if glucose > calc["target_glucose"]:
-        diff = glucose - calc["target_glucose"]
-        lines.append(
-            f"Correcao: ({glucose} - {calc['target_glucose']}) / {calc['correction_factor']} (FC) "
-            f"= {calc['dose_correcao']} U"
-        )
-    elif glucose < 70:
-        lines.append(f"Atencao: Glicemia {glucose} mg/dL esta BAIXA. Considere ingerir carboidratos.")
-
-    lines.append(f"\nDOSE TOTAL SUGERIDA: {calc['dose_total']} U")
-    lines.append(f"\nQuantas unidades voce aplicou de fato? (texto ou audio)")
-    return "\n".join(lines)
+TEXT_FILTER = filters.TEXT & ~filters.COMMAND
 
 
 # =====================================================================
-# COMANDO /start
+# MENU PRINCIPAL (/start)
 # =====================================================================
+
+def _main_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Registrar Glicemia", callback_data="cmd_registrar")],
+        [
+            InlineKeyboardButton("Historico", callback_data="cmd_historico"),
+            InlineKeyboardButton("Grafico", callback_data="cmd_grafico"),
+        ],
+        [
+            InlineKeyboardButton("Buscar Alimento", callback_data="cmd_buscar"),
+            InlineKeyboardButton("Meu Perfil", callback_data="cmd_perfil"),
+        ],
+        [InlineKeyboardButton("Ajuda", callback_data="cmd_ajuda")],
+    ])
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    welcome = (
-        "Ola! Eu sou o GlycemiBot, seu assistente de monitoramento glicemico.\n\n"
-        "Voce pode interagir por TEXTO ou AUDIO em qualquer etapa.\n\n"
-        "Comandos disponiveis:\n"
-        "/perfil - Configurar seu perfil clinico\n"
-        "/registrar - Registrar glicemia e calcular insulina\n"
-        "/historico - Ver seus ultimos 10 registros\n"
-        "/grafico - Grafico glicemico dos ultimos 7 dias\n"
-        "/buscar - Buscar alimento na tabela TACO\n"
-        "/ajuda - Ver ajuda detalhada\n"
-        "/cancelar - Cancelar operacao em andamento"
+    text = (
+        "Ola! Eu sou o GlycemiBot.\n"
+        "Seu assistente de monitoramento glicemico.\n\n"
+        "O que deseja fazer?"
     )
-    await update.message.reply_text(welcome)
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text, reply_markup=_main_menu_keyboard())
+    else:
+        await update.message.reply_text(text, reply_markup=_main_menu_keyboard())
+
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler de botoes do menu principal."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "cmd_historico":
+        await _show_historico(query, context)
+    elif data == "cmd_grafico":
+        await _show_grafico(query, context)
+    elif data == "cmd_ajuda":
+        await _show_ajuda(query)
+    elif data == "cmd_buscar":
+        await query.edit_message_text("Digite o nome do alimento que deseja buscar:")
+    elif data == "cmd_menu":
+        await start(update, context)
 
 
 # =====================================================================
-# COMANDO /ajuda
+# AJUDA
 # =====================================================================
 
-async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    help_text = (
-        "GlycemiBot - Ajuda Detalhada\n\n"
-        "CONFIGURACAO:\n"
-        "/perfil - Cadastra seus dados clinicos:\n"
-        "  - Idade, peso, altura, HbA1c\n"
-        "  - Dose e horario de insulina basal\n"
-        "  - Razao Insulina/Carboidrato (ICR)\n"
-        "  - Fator de Correcao (FC)\n"
-        "  - Glicemia alvo\n\n"
-        "REGISTRO DIARIO:\n"
-        "/registrar - Novo registro (aceita texto ou audio):\n"
-        "  1. Informe sua glicemia atual\n"
-        "  2. Descreva sua refeicao (ou 'nada')\n"
-        "  3. O bot calcula a dose:\n"
-        "     Bolus = carboidratos / ICR\n"
-        "     Correcao = (glicemia - alvo) / FC\n"
-        "     Dose total = Bolus + Correcao\n"
-        "  4. Informe a insulina que aplicou\n\n"
-        "CONSULTAS:\n"
-        "/historico - Ultimos 10 registros\n"
-        "/grafico - Grafico de 7 dias\n"
-        "/buscar <alimento> - Carboidratos na tabela TACO\n\n"
-        "/cancelar - Cancela qualquer operacao"
+async def _show_ajuda(query) -> None:
+    text = (
+        "GlycemiBot - Ajuda\n\n"
+        "PERFIL:\n"
+        "  Cadastra: idade, peso, altura, HbA1c,\n"
+        "  insulina basal, ICR, fator de correcao, glicemia alvo\n\n"
+        "REGISTRO:\n"
+        "  1. Informe a glicemia\n"
+        "  2. Adicione alimentos (busca na tabela TACO)\n"
+        "  3. Informe quantidade (gramas ou medidas caseiras)\n"
+        "  4. Registre humor e exercicio\n"
+        "  5. Veja o calculo detalhado da dose\n"
+        "  6. Salve refeicoes favoritas para reusar\n\n"
+        "CALCULO DE DOSE:\n"
+        "  Bolus = carboidratos / ICR\n"
+        "  Correcao = (glicemia - alvo) / FC\n"
+        "  Exercicio: Leve -10%, Moderado -20%, Intenso -30%\n"
+        "  Dose total = (Bolus + Correcao) x fator exercicio\n\n"
+        "MEDIDAS ACEITAS:\n"
+        "  200g, 2 colheres de sopa, 1 xicara,\n"
+        "  1 concha, 3 fatias, 1 unidade, 1 copo"
     )
-    await update.message.reply_text(help_text)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Voltar ao menu", callback_data="cmd_menu")]])
+    await query.edit_message_text(text, reply_markup=kb)
 
 
 # =====================================================================
-# COMANDO /historico
+# HISTORICO
 # =====================================================================
 
-async def historico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.message.from_user.id
+async def _show_historico(query, context) -> None:
+    user_id = query.from_user.id
     logs = get_recent_logs(user_id, limit=10)
 
     if not logs:
-        await update.message.reply_text("Nenhum registro encontrado. Use /registrar para comecar.")
-        return
+        text = "Nenhum registro encontrado."
+    else:
+        lines = ["Ultimos registros:\n"]
+        for log in logs:
+            ts = log.get("timestamp", "")[:16].replace("T", " ")
+            glucose = log.get("glucose_level", "-")
+            carbs = log.get("carbs_ingested", "-")
+            bolus = log.get("bolus_insulin", "-")
+            refeicao = log.get("refeicao", "-")
+            mood = log.get("mood", "")
+            exercise = log.get("exercise_intensity", "")
+            extra = ""
+            if mood:
+                extra += f" | Humor: {mood}"
+            if exercise:
+                extra += f" | Exercicio: {exercise}"
+            lines.append(
+                f"  {ts}\n"
+                f"  Glic: {glucose} | Carbs: {carbs}g | Ins: {bolus}U\n"
+                f"  {refeicao}{extra}\n"
+            )
+        text = "\n".join(lines)
 
-    lines = ["Ultimos registros:\n"]
-    for log in logs:
-        ts = log.get("timestamp", "")[:16].replace("T", " ")
-        glucose = log.get("glucose_level", "-")
-        carbs = log.get("carbs_ingested", "-")
-        bolus = log.get("bolus_insulin", "-")
-        refeicao = log.get("refeicao", "-")
-        lines.append(
-            f"  {ts}\n"
-            f"  Glicemia: {glucose} mg/dL | Carbs: {carbs}g | Insulina: {bolus}U\n"
-            f"  Refeicao: {refeicao}\n"
-        )
-
-    await update.message.reply_text("\n".join(lines))
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Voltar ao menu", callback_data="cmd_menu")]])
+    await query.edit_message_text(text, reply_markup=kb)
 
 
 # =====================================================================
-# COMANDO /grafico
+# GRAFICO
 # =====================================================================
 
-async def grafico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.message.from_user.id
+async def _show_grafico(query, context) -> None:
+    user_id = query.from_user.id
     logs = get_logs_for_period(user_id, days=7)
 
     if not logs:
-        await update.message.reply_text("Sem registros nos ultimos 7 dias para gerar o grafico.")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Voltar ao menu", callback_data="cmd_menu")]])
+        await query.edit_message_text("Sem registros nos ultimos 7 dias.", reply_markup=kb)
         return
 
     try:
         chart_buf = generate_glucose_chart(logs)
-        await update.message.reply_photo(
-            photo=chart_buf,
-            caption="Historico glicemico dos ultimos 7 dias."
-        )
-    except ValueError as e:
-        await update.message.reply_text(str(e))
+        await query.message.reply_photo(photo=chart_buf, caption="Historico glicemico - 7 dias")
+        await query.delete_message()
     except Exception as e:
         logging.error(f"Erro ao gerar grafico: {e}")
-        await update.message.reply_text("Erro ao gerar o grafico. Tente novamente.")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Voltar ao menu", callback_data="cmd_menu")]])
+        await query.edit_message_text("Erro ao gerar grafico.", reply_markup=kb)
 
 
 # =====================================================================
-# COMANDO /buscar
+# BUSCAR ALIMENTO (standalone)
 # =====================================================================
 
 async def buscar_alimento(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = " ".join(context.args) if context.args else ""
-
-    if not query:
-        await update.message.reply_text("Use: /buscar <nome do alimento>\nExemplo: /buscar arroz")
+    query_text = " ".join(context.args) if context.args else ""
+    if not query_text:
+        await update.message.reply_text("Use: /buscar <alimento>\nExemplo: /buscar arroz")
         return
 
-    results = search_food(query, limit=5)
-
+    results = search_food(query_text, limit=5)
     if not results:
-        await update.message.reply_text(f"Nenhum alimento encontrado para '{query}'.")
+        await update.message.reply_text(f"Nenhum resultado para '{query_text}'.")
         return
 
-    lines = [f"Resultados para '{query}':\n"]
+    lines = [f"Resultados para '{query_text}':\n"]
     for item in results:
-        name = item.get("food_name", "-")
-        carbs = item.get("carbs_per_portion", 0)
-        portion = item.get("portion_size", 100)
-        unit = item.get("unit", "g")
-        lines.append(f"  {name}\n  Carboidratos: {carbs}g por {portion}{unit}\n")
-
+        lines.append(f"  {item['food_name']}\n  {item['carbs_per_portion']}g carbs por 100g\n")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -203,120 +192,123 @@ async def buscar_alimento(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # =====================================================================
 
 async def start_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
-        "Vamos configurar seu perfil clinico.\n"
-        "Voce pode responder por texto ou audio em todas as etapas.\n\n"
-        "Qual a sua idade?"
-    )
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            "Vamos configurar seu perfil clinico.\n\nQual a sua idade?"
+        )
+    else:
+        await update.message.reply_text(
+            "Vamos configurar seu perfil clinico.\n\nQual a sua idade?"
+        )
     return AGE
 
 
 async def ask_weight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        text = await _get_text_from_message(update, context)
-        context.user_data['age'] = int(text.strip().split()[0])
+        context.user_data['age'] = int(update.message.text.strip().split()[0])
         await update.message.reply_text("Qual o seu peso atual (em kg)?")
         return WEIGHT
     except (ValueError, IndexError):
-        await update.message.reply_text("Por favor, insira um numero inteiro valido para a idade.")
+        await update.message.reply_text("Insira um numero inteiro para a idade.")
         return AGE
 
 
 async def ask_height(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        text = await _get_text_from_message(update, context)
-        context.user_data['weight'] = float(text.strip().replace(',', '.').split()[0])
+        context.user_data['weight'] = float(update.message.text.replace(',', '.').split()[0])
         await update.message.reply_text("Qual a sua altura (em metros, ex: 1.75)?")
         return HEIGHT
     except (ValueError, IndexError):
-        await update.message.reply_text("Formato invalido. Insira o peso em numeros.")
+        await update.message.reply_text("Formato invalido.")
         return WEIGHT
 
 
 async def ask_hba1c(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        text = await _get_text_from_message(update, context)
-        context.user_data['height'] = float(text.strip().replace(',', '.').split()[0])
-        await update.message.reply_text("Qual o valor da sua ultima hemoglobina glicada (HbA1c)?")
+        context.user_data['height'] = float(update.message.text.replace(',', '.').split()[0])
+        await update.message.reply_text("Qual sua ultima hemoglobina glicada (HbA1c)?")
         return HBA1C
     except (ValueError, IndexError):
-        await update.message.reply_text("Formato invalido. Insira a altura em metros.")
+        await update.message.reply_text("Formato invalido.")
         return HEIGHT
 
 
 async def ask_basal_dose(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        text = await _get_text_from_message(update, context)
-        context.user_data['last_hba1c'] = float(text.strip().replace(',', '.').split()[0])
-        await update.message.reply_text("Quantas unidades de insulina BASAL voce aplica diariamente?")
+        context.user_data['last_hba1c'] = float(update.message.text.replace(',', '.').split()[0])
+        await update.message.reply_text("Quantas unidades de insulina BASAL voce aplica por dia?")
         return BASAL_DOSE
     except (ValueError, IndexError):
-        await update.message.reply_text("Formato invalido. Insira o valor numerico da HbA1c.")
+        await update.message.reply_text("Formato invalido.")
         return HBA1C
 
 
 async def ask_basal_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        text = await _get_text_from_message(update, context)
-        context.user_data['basal_dose'] = float(text.strip().replace(',', '.').split()[0])
-        await update.message.reply_text("Em qual horario voce aplica a insulina basal (ex: 22:00)?")
+        context.user_data['basal_dose'] = float(update.message.text.replace(',', '.').split()[0])
+        await update.message.reply_text("Horario da insulina basal (ex: 22:00)?")
         return BASAL_TIME
     except (ValueError, IndexError):
-        await update.message.reply_text("Formato invalido. Insira o numero de unidades.")
+        await update.message.reply_text("Formato invalido.")
         return BASAL_DOSE
 
 
 async def ask_icr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = await _get_text_from_message(update, context)
-    context.user_data['basal_time'] = text.strip()
+    context.user_data['basal_time'] = update.message.text.strip()
     await update.message.reply_text(
-        "Qual a sua RAZAO INSULINA/CARBOIDRATO (ICR)?\n\n"
-        "Isso significa: quantos gramas de carboidrato 1 unidade de insulina rapida cobre.\n"
-        "Exemplo: se voce aplica 1U para cada 10g de carbo, digite 10."
+        "Qual sua RAZAO INSULINA/CARBOIDRATO (ICR)?\n\n"
+        "Quantos gramas de carbo 1U de insulina rapida cobre?\n"
+        "Ex: se 1U cobre 10g, digite 10."
     )
     return ICR
 
 
 async def ask_correction_factor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        text = await _get_text_from_message(update, context)
-        context.user_data['icr'] = float(text.strip().replace(',', '.').split()[0])
+        context.user_data['icr'] = float(update.message.text.replace(',', '.').split()[0])
         await update.message.reply_text(
-            "Qual o seu FATOR DE CORRECAO (FC)?\n\n"
-            "Isso significa: quantos mg/dL 1 unidade de insulina rapida reduz a sua glicemia.\n"
-            "Exemplo: se 1U abaixa 50 mg/dL, digite 50."
+            "Qual seu FATOR DE CORRECAO (FC)?\n\n"
+            "Quantos mg/dL 1U de rapida reduz sua glicemia?\n"
+            "Ex: se 1U abaixa 50 mg/dL, digite 50."
         )
         return CORRECTION_FACTOR
     except (ValueError, IndexError):
-        await update.message.reply_text("Formato invalido. Insira um numero (ex: 10).")
+        await update.message.reply_text("Formato invalido. Insira um numero.")
         return ICR
 
 
 async def ask_target_glucose(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        text = await _get_text_from_message(update, context)
-        context.user_data['correction_factor'] = float(text.strip().replace(',', '.').split()[0])
-        await update.message.reply_text(
-            "Qual a sua GLICEMIA ALVO (mg/dL)?\n\n"
-            "O padrao clinico e entre 100-120 mg/dL.\n"
-            "Se nao souber, digite 120."
-        )
+        context.user_data['correction_factor'] = float(update.message.text.replace(',', '.').split()[0])
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("100", callback_data="target_100"),
+                InlineKeyboardButton("110", callback_data="target_110"),
+                InlineKeyboardButton("120", callback_data="target_120"),
+            ]
+        ])
+        await update.message.reply_text("Qual sua GLICEMIA ALVO (mg/dL)?", reply_markup=kb)
         return TARGET_GLUCOSE
     except (ValueError, IndexError):
-        await update.message.reply_text("Formato invalido. Insira um numero (ex: 50).")
+        await update.message.reply_text("Formato invalido.")
         return CORRECTION_FACTOR
 
 
 async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    try:
-        text = await _get_text_from_message(update, context)
-        context.user_data['target_glucose'] = int(text.strip().split()[0])
-    except (ValueError, IndexError):
-        context.user_data['target_glucose'] = 120
+    if update.callback_query:
+        await update.callback_query.answer()
+        val = update.callback_query.data.replace("target_", "")
+        context.user_data['target_glucose'] = int(val)
+    else:
+        try:
+            context.user_data['target_glucose'] = int(update.message.text.strip().split()[0])
+        except (ValueError, IndexError):
+            context.user_data['target_glucose'] = 120
 
     try:
         upsert_user_profile(
-            telegram_user_id=update.message.from_user.id,
+            telegram_user_id=(update.callback_query or update.message).from_user.id,
             age=context.user_data['age'],
             weight=context.user_data['weight'],
             height=context.user_data['height'],
@@ -327,167 +319,431 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             correction_factor=context.user_data['correction_factor'],
             target_glucose=context.user_data['target_glucose'],
         )
-
         summary = (
-            "Perfil salvo com sucesso!\n\n"
-            f"Idade: {context.user_data['age']} anos\n"
-            f"Peso: {context.user_data['weight']} kg\n"
-            f"Altura: {context.user_data['height']} m\n"
-            f"HbA1c: {context.user_data['last_hba1c']}%\n"
+            "Perfil salvo!\n\n"
+            f"Idade: {context.user_data['age']} | Peso: {context.user_data['weight']}kg\n"
+            f"Altura: {context.user_data['height']}m | HbA1c: {context.user_data['last_hba1c']}%\n"
             f"Basal: {context.user_data['basal_dose']}U as {context.user_data['basal_time']}\n"
-            f"ICR: 1U para cada {context.user_data['icr']}g de carbo\n"
-            f"Fator de Correcao: 1U reduz {context.user_data['correction_factor']} mg/dL\n"
-            f"Glicemia alvo: {context.user_data['target_glucose']} mg/dL\n\n"
-            "Use /registrar para comecar a registrar sua glicemia."
+            f"ICR: 1U/{context.user_data['icr']}g | FC: 1U/{context.user_data['correction_factor']}mg/dL\n"
+            f"Alvo: {context.user_data['target_glucose']} mg/dL"
         )
-        await update.message.reply_text(summary)
+        effective = update.callback_query.message if update.callback_query else update.message
+        await effective.reply_text(summary, reply_markup=_main_menu_keyboard())
     except Exception as e:
-        await update.message.reply_text("Falha ao salvar o perfil no banco de dados.")
-        logging.error(f"Erro no onboarding: {e}")
+        logging.error(f"Erro onboarding: {e}")
+        effective = update.callback_query.message if update.callback_query else update.message
+        await effective.reply_text("Falha ao salvar perfil.")
 
     context.user_data.clear()
     return ConversationHandler.END
 
 
 # =====================================================================
-# FLUXO DE REGISTRO DIARIO (/registrar)
+# FLUXO DE REGISTRO (/registrar)
 # =====================================================================
 
 async def start_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.message.from_user.id
-    profile = get_user_profile(user_id)
+    if update.callback_query:
+        await update.callback_query.answer()
+        user_id = update.callback_query.from_user.id
+        msg_func = update.callback_query.edit_message_text
+    else:
+        user_id = update.message.from_user.id
+        msg_func = update.message.reply_text
 
+    profile = get_user_profile(user_id)
     if not profile or not profile.get('insulin_carb_ratio'):
-        await update.message.reply_text(
-            "Voce ainda nao configurou seu perfil clinico.\n"
-            "Use /perfil primeiro para cadastrar seus dados (ICR, fator de correcao, etc)."
-        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Configurar Perfil", callback_data="cmd_perfil")]
+        ])
+        await msg_func("Configure seu perfil primeiro.", reply_markup=kb)
         return ConversationHandler.END
 
     context.user_data['profile'] = profile
-    await update.message.reply_text(
-        "Iniciando registro. Qual a sua glicemia atual (mg/dL)?\n"
-        "(Pode enviar por texto ou audio)"
-    )
-    return GLUCOSE_STATE
+    context.user_data['food_items'] = []
+    context.user_data['total_carbs'] = 0.0
+    await msg_func("Qual a sua glicemia atual (mg/dL)?")
+    return REG_GLUCOSE
 
 
 async def receive_glucose(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        text = await _get_text_from_message(update, context)
-        # Extrai o primeiro numero do texto (suporte a voz tipo "cento e vinte" -> dificil, mas "120" funciona)
-        numbers = [s for s in text.strip().replace(',', '.').split() if s.replace('.', '').isdigit()]
-        if not numbers:
-            raise ValueError("Nenhum numero encontrado")
-        context.user_data['glucose'] = int(float(numbers[0]))
+        glucose = int(update.message.text.strip().split()[0])
+        context.user_data['glucose'] = glucose
 
-        glucose = context.user_data['glucose']
         warning = ""
         if glucose < 70:
-            warning = "\n⚠ HIPOGLICEMIA DETECTADA. Considere ingerir 15g de carboidrato rapido.\n"
+            warning = "\nATENCAO: Glicemia BAIXA! Considere 15g de carbo rapido.\n"
         elif glucose > 250:
-            warning = "\n⚠ HIPERGLICEMIA SEVERA. Atencao redobrada.\n"
+            warning = "\nATENCAO: Hiperglicemia severa.\n"
 
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Sim, vou comer", callback_data="food_yes")],
+            [InlineKeyboardButton("Usar refeicao salva", callback_data="food_saved")],
+            [InlineKeyboardButton("Nao vou comer", callback_data="food_no")],
+        ])
         await update.message.reply_text(
-            f"Glicemia registrada: {glucose} mg/dL.{warning}\n"
-            "O que voce vai comer agora?\n"
-            "Descreva a refeicao ou diga 'nada'. (texto ou audio)"
+            f"Glicemia: {glucose} mg/dL{warning}\nVoce vai comer agora?",
+            reply_markup=kb
         )
-        return FOOD_STATE
+        return REG_FOOD_CHOICE
     except (ValueError, IndexError):
-        await update.message.reply_text("Nao entendi. Insira a glicemia em numeros (ex: 120).")
-        return GLUCOSE_STATE
+        await update.message.reply_text("Insira a glicemia em numeros (ex: 120).")
+        return REG_GLUCOSE
 
 
-async def receive_food(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = await _get_text_from_message(update, context)
-    food_text = text.lower().strip()
+async def food_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    choice = query.data
 
-    processing_msg = await update.message.reply_text("Processando informacoes nutricionais...")
+    if choice == "food_no":
+        context.user_data['food_desc'] = "Sem refeicao"
+        return await _ask_mood(query)
 
-    profile = context.user_data['profile']
-    glucose = context.user_data['glucose']
-    icr = profile.get('insulin_carb_ratio', 10)
-    cf = profile.get('correction_factor', 50)
-    target = profile.get('target_glucose', 120)
+    if choice == "food_saved":
+        user_id = query.from_user.id
+        meals = get_saved_meals(user_id)
+        if not meals:
+            await query.edit_message_text("Nenhuma refeicao salva. Digite o nome do alimento:")
+            return REG_FOOD_SEARCH
 
-    if food_text in ('nada', 'nao', 'nao vou comer', 'nenhuma', 'nao comi'):
-        context.user_data['carbs'] = 0.0
-        context.user_data['food_desc'] = "Nenhuma refeicao"
+        buttons = []
+        for meal in meals[:8]:
+            label = f"{meal['meal_name']} ({meal['total_carbs']}g carbs)"
+            buttons.append([InlineKeyboardButton(label, callback_data=f"meal_{meal['id']}")])
+        buttons.append([InlineKeyboardButton("Cancelar", callback_data="food_yes")])
+        await query.edit_message_text("Suas refeicoes salvas:", reply_markup=InlineKeyboardMarkup(buttons))
+        return REG_MEAL_SELECT
+
+    # food_yes
+    await query.edit_message_text("Digite o nome do alimento (ex: arroz, feijao, frango):")
+    return REG_FOOD_SEARCH
+
+
+async def meal_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "food_yes":
+        await query.edit_message_text("Digite o nome do alimento:")
+        return REG_FOOD_SEARCH
+
+    meal_id = int(data.replace("meal_", ""))
+    user_id = query.from_user.id
+    meals = get_saved_meals(user_id)
+    meal = next((m for m in meals if m['id'] == meal_id), None)
+
+    if not meal:
+        await query.edit_message_text("Refeicao nao encontrada. Digite o alimento:")
+        return REG_FOOD_SEARCH
+
+    items = meal['items'] if isinstance(meal['items'], list) else json.loads(meal['items'])
+    context.user_data['food_items'] = items
+    context.user_data['total_carbs'] = meal['total_carbs']
+    context.user_data['food_desc'] = meal['meal_name']
+
+    lines = [f"Refeicao: {meal['meal_name']}\n"]
+    for item in items:
+        lines.append(f"  {item['food_name']}: {item['quantity_g']}g = {item['carbs']}g carbs")
+    lines.append(f"\nTotal: {meal['total_carbs']}g carboidratos")
+
+    await query.edit_message_text("\n".join(lines))
+    return await _ask_mood(query)
+
+
+async def food_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query_text = update.message.text.strip()
+    results = search_food(query_text, limit=6)
+
+    if not results:
+        await update.message.reply_text(
+            f"Nenhum resultado para '{query_text}'.\nTente outro nome:"
+        )
+        return REG_FOOD_SEARCH
+
+    buttons = []
+    for item in results:
+        label = f"{item['food_name']} ({item['carbs_per_portion']}g/100g)"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"food_{item['id']}")])
+
+    await update.message.reply_text(
+        f"Resultados para '{query_text}':",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    return REG_FOOD_SELECT
+
+
+async def food_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    food_id = int(query.data.replace("food_", ""))
+    food = get_food_by_id(food_id)
+
+    if not food:
+        await query.edit_message_text("Alimento nao encontrado. Tente novamente:")
+        return REG_FOOD_SEARCH
+
+    context.user_data['current_food'] = food
+    await query.edit_message_text(
+        f"Selecionado: {food['food_name']}\n"
+        f"({food['carbs_per_portion']}g carbs por 100g)\n\n"
+        f"Quanto voce vai consumir?\n\n"
+        f"{format_portion_help()}"
+    )
+    return REG_FOOD_QTY
+
+
+async def food_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    food = context.user_data.get('current_food', {})
+
+    quantity_g = parse_quantity(text)
+    carbs = calculate_carbs_from_portion(food.get('carbs_per_portion', 0), quantity_g)
+
+    item = {
+        "food_name": food.get('food_name', ''),
+        "quantity_g": quantity_g,
+        "carbs": carbs,
+    }
+    context.user_data['food_items'].append(item)
+    context.user_data['total_carbs'] = round(context.user_data['total_carbs'] + carbs, 1)
+
+    items = context.user_data['food_items']
+    lines = ["Alimentos adicionados:\n"]
+    for i in items:
+        lines.append(f"  {i['food_name']}: {i['quantity_g']}g = {i['carbs']}g carbs")
+    lines.append(f"\nTotal parcial: {context.user_data['total_carbs']}g carboidratos")
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Adicionar mais alimento", callback_data="more_yes")],
+        [InlineKeyboardButton("Pronto, finalizar refeicao", callback_data="more_no")],
+    ])
+    await update.message.reply_text("\n".join(lines), reply_markup=kb)
+    return REG_FOOD_MORE
+
+
+async def food_more_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "more_yes":
+        await query.edit_message_text("Digite o nome do proximo alimento:")
+        return REG_FOOD_SEARCH
+
+    # Pronto -> montar descricao
+    items = context.user_data['food_items']
+    context.user_data['food_desc'] = ", ".join(i['food_name'] for i in items)
+    return await _ask_mood(query)
+
+
+# =====================================================================
+# HUMOR
+# =====================================================================
+
+async def _ask_mood(query_or_msg) -> int:
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Bem", callback_data="mood_Bem"),
+            InlineKeyboardButton("Normal", callback_data="mood_Normal"),
+        ],
+        [
+            InlineKeyboardButton("Estressado", callback_data="mood_Estressado"),
+            InlineKeyboardButton("Ansioso", callback_data="mood_Ansioso"),
+        ],
+        [
+            InlineKeyboardButton("Triste", callback_data="mood_Triste"),
+            InlineKeyboardButton("Pular", callback_data="mood_skip"),
+        ],
+    ])
+    if hasattr(query_or_msg, 'edit_message_text'):
+        await query_or_msg.edit_message_text("Como voce esta se sentindo?", reply_markup=kb)
     else:
-        try:
-            extracted_data = extract_health_data(food_text)
-            carbs = extracted_data.get('carbs_ingested', 0.0) or 0.0
-            context.user_data['carbs'] = carbs
-            context.user_data['food_desc'] = food_text
-        except Exception as e:
-            logging.error(f"Erro NLP: {e}")
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=processing_msg.message_id,
-                text="Erro ao processar a refeicao. Tente novamente."
-            )
-            return FOOD_STATE
+        await query_or_msg.message.reply_text("Como voce esta se sentindo?", reply_markup=kb)
+    return REG_MOOD
+
+
+async def mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    mood = query.data.replace("mood_", "")
+    context.user_data['mood'] = None if mood == "skip" else mood
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Nenhum", callback_data="ex_nenhum")],
+        [
+            InlineKeyboardButton("Leve (-10%)", callback_data="ex_leve"),
+            InlineKeyboardButton("Moderado (-20%)", callback_data="ex_moderado"),
+        ],
+        [InlineKeyboardButton("Intenso (-30%)", callback_data="ex_intenso")],
+    ])
+    await query.edit_message_text(
+        "Fez ou vai fazer exercicio?\n\n"
+        "Exercicio aumenta a sensibilidade a insulina,\n"
+        "reduzindo a dose necessaria.",
+        reply_markup=kb
+    )
+    return REG_EXERCISE
+
+
+# =====================================================================
+# EXERCICIO
+# =====================================================================
+
+async def exercise_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    intensity = query.data.replace("ex_", "")
+    context.user_data['exercise_intensity'] = intensity
+    context.user_data['exercise_done'] = intensity != "nenhum"
+
+    # Calcular dose
+    profile = context.user_data['profile']
+    glucose = context.user_data.get('glucose', 0)
+    total_carbs = context.user_data.get('total_carbs', 0.0)
 
     calc = calculate_total_dose(
-        carbs_ingested=context.user_data['carbs'],
+        carbs_ingested=total_carbs,
         current_glucose=glucose,
-        insulin_carb_ratio=icr,
-        correction_factor=cf,
-        target_glucose=target,
+        insulin_carb_ratio=profile.get('insulin_carb_ratio', 10),
+        correction_factor=profile.get('correction_factor', 50),
+        target_glucose=profile.get('target_glucose', 120),
+        exercise_intensity=intensity,
     )
     context.user_data['calc'] = calc
 
-    response_text = _format_dose_calculation(calc, glucose)
+    # Formatar resultado
+    lines = ["CALCULO DE DOSE\n"]
 
-    await context.bot.edit_message_text(
-        chat_id=update.effective_chat.id,
-        message_id=processing_msg.message_id,
-        text=response_text
-    )
-    return INSULIN_STATE
+    if calc["carbs_ingested"] > 0:
+        lines.append(
+            f"Bolus: {calc['carbs_ingested']}g / {calc['insulin_carb_ratio']} (ICR) "
+            f"= {calc['bolus_alimentar']}U"
+        )
 
+    if glucose > calc["target_glucose"]:
+        lines.append(
+            f"Correcao: ({glucose} - {calc['target_glucose']}) / {calc['correction_factor']} "
+            f"= {calc['dose_correcao']}U"
+        )
+
+    if calc["exercise_reduction"] > 0:
+        lines.append(
+            f"Exercicio {intensity}: -{calc['exercise_reduction']}U "
+            f"({int((1 - calc['exercise_factor']) * 100)}% reducao)"
+        )
+
+    if glucose < 70:
+        lines.append("\nATENCAO: Glicemia baixa - cuidado ao aplicar insulina!")
+
+    lines.append(f"\nDOSE TOTAL SUGERIDA: {calc['dose_total']}U")
+    lines.append("\nQuantas unidades voce aplicou?")
+
+    await query.edit_message_text("\n".join(lines))
+    return REG_INSULIN
+
+
+# =====================================================================
+# INSULINA APLICADA
+# =====================================================================
 
 async def receive_insulin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        text = await _get_text_from_message(update, context)
-        numbers = [s for s in text.strip().replace(',', '.').split() if s.replace('.', '').isdigit()]
-        if not numbers:
-            raise ValueError("Nenhum numero encontrado")
-        applied_insulin = float(numbers[0])
-
+        applied = float(update.message.text.replace(',', '.').strip().split()[0])
         calc = context.user_data.get('calc', {})
         suggested = calc.get('dose_total', 0)
+        glucose = context.user_data.get('glucose', 0)
+        total_carbs = context.user_data.get('total_carbs', 0.0)
 
         insert_glycemic_log(
             telegram_user_id=update.message.from_user.id,
-            glucose_level=context.user_data.get('glucose'),
-            carbs_ingested=context.user_data.get('carbs'),
-            bolus_insulin=applied_insulin,
-            refeicao=context.user_data.get('food_desc', 'Nao especificada')
+            glucose_level=glucose,
+            carbs_ingested=total_carbs,
+            bolus_insulin=applied,
+            exercise_done=context.user_data.get('exercise_done', False),
+            exercise_intensity=context.user_data.get('exercise_intensity'),
+            mood=context.user_data.get('mood'),
+            refeicao=context.user_data.get('food_desc', 'Sem refeicao'),
         )
 
         diff_text = ""
-        if suggested > 0 and applied_insulin != suggested:
-            diff = round(applied_insulin - suggested, 2)
+        if suggested > 0 and applied != suggested:
+            diff = round(applied - suggested, 2)
             if diff > 0:
-                diff_text = f"\n(Voce aplicou {diff}U a mais que o sugerido)"
-            elif diff < 0:
-                diff_text = f"\n(Voce aplicou {abs(diff)}U a menos que o sugerido)"
+                diff_text = f"\n({diff}U a mais que o sugerido)"
+            else:
+                diff_text = f"\n({abs(diff)}U a menos que o sugerido)"
 
-        await update.message.reply_text(
-            f"Registro salvo com sucesso!{diff_text}\n\n"
-            f"Glicemia: {context.user_data.get('glucose')} mg/dL\n"
-            f"Carboidratos: {context.user_data.get('carbs')}g\n"
-            f"Insulina aplicada: {applied_insulin}U\n"
-            f"Dose sugerida: {suggested}U"
-        )
+        # Perguntar se quer salvar a refeicao
+        items = context.user_data.get('food_items', [])
+        if items:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Salvar refeicao como favorita", callback_data="save_meal_yes")],
+                [InlineKeyboardButton("Finalizar", callback_data="save_meal_no")],
+            ])
+            await update.message.reply_text(
+                f"Registro salvo!{diff_text}\n\n"
+                f"Glic: {glucose} mg/dL | Carbs: {total_carbs}g\n"
+                f"Aplicou: {applied}U | Sugerido: {suggested}U\n\n"
+                "Deseja salvar esta refeicao como favorita?",
+                reply_markup=kb
+            )
+            return REG_SAVE_MEAL_CHOICE
+        else:
+            await update.message.reply_text(
+                f"Registro salvo!{diff_text}\n\n"
+                f"Glic: {glucose} mg/dL | Aplicou: {applied}U | Sugerido: {suggested}U",
+                reply_markup=_main_menu_keyboard()
+            )
+            context.user_data.clear()
+            return ConversationHandler.END
+
+    except (ValueError, IndexError):
+        await update.message.reply_text("Insira um numero (ex: 5 ou 5.5).")
+        return REG_INSULIN
+
+
+# =====================================================================
+# SALVAR REFEICAO
+# =====================================================================
+
+async def save_meal_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "save_meal_no":
+        await query.edit_message_text("Registro finalizado!", reply_markup=_main_menu_keyboard())
         context.user_data.clear()
         return ConversationHandler.END
 
-    except (ValueError, IndexError):
-        await update.message.reply_text("Formato invalido. Insira um numero para a insulina aplicada.")
-        return INSULIN_STATE
+    await query.edit_message_text("Digite um nome para esta refeicao (ex: Almoco padrao):")
+    return REG_SAVE_MEAL_NAME
+
+
+async def save_meal_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    name = update.message.text.strip()
+    items = context.user_data.get('food_items', [])
+    total_carbs = context.user_data.get('total_carbs', 0.0)
+
+    try:
+        save_meal(
+            telegram_user_id=update.message.from_user.id,
+            meal_name=name,
+            items=items,
+            total_carbs=total_carbs,
+        )
+        await update.message.reply_text(
+            f"Refeicao '{name}' salva com sucesso!",
+            reply_markup=_main_menu_keyboard()
+        )
+    except Exception as e:
+        logging.error(f"Erro ao salvar refeicao: {e}")
+        await update.message.reply_text("Erro ao salvar.", reply_markup=_main_menu_keyboard())
+
+    context.user_data.clear()
+    return ConversationHandler.END
 
 
 # =====================================================================
@@ -495,7 +751,11 @@ async def receive_insulin(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # =====================================================================
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Operacao cancelada.")
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("Operacao cancelada.")
+    else:
+        await update.message.reply_text("Operacao cancelada.", reply_markup=_main_menu_keyboard())
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -504,31 +764,46 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # CONVERSATION HANDLERS
 # =====================================================================
 
-# Filtro que aceita texto OU audio de voz
-text_or_voice = (filters.TEXT & ~filters.COMMAND) | filters.VOICE
-
 onboarding_conv_handler = ConversationHandler(
-    entry_points=[CommandHandler('perfil', start_onboarding)],
+    entry_points=[
+        CommandHandler('perfil', start_onboarding),
+        CallbackQueryHandler(start_onboarding, pattern='^cmd_perfil$'),
+    ],
     states={
-        AGE: [MessageHandler(text_or_voice, ask_weight)],
-        WEIGHT: [MessageHandler(text_or_voice, ask_height)],
-        HEIGHT: [MessageHandler(text_or_voice, ask_hba1c)],
-        HBA1C: [MessageHandler(text_or_voice, ask_basal_dose)],
-        BASAL_DOSE: [MessageHandler(text_or_voice, ask_basal_time)],
-        BASAL_TIME: [MessageHandler(text_or_voice, ask_icr)],
-        ICR: [MessageHandler(text_or_voice, ask_correction_factor)],
-        CORRECTION_FACTOR: [MessageHandler(text_or_voice, ask_target_glucose)],
-        TARGET_GLUCOSE: [MessageHandler(text_or_voice, finish_onboarding)],
+        AGE: [MessageHandler(TEXT_FILTER, ask_weight)],
+        WEIGHT: [MessageHandler(TEXT_FILTER, ask_height)],
+        HEIGHT: [MessageHandler(TEXT_FILTER, ask_hba1c)],
+        HBA1C: [MessageHandler(TEXT_FILTER, ask_basal_dose)],
+        BASAL_DOSE: [MessageHandler(TEXT_FILTER, ask_basal_time)],
+        BASAL_TIME: [MessageHandler(TEXT_FILTER, ask_icr)],
+        ICR: [MessageHandler(TEXT_FILTER, ask_correction_factor)],
+        CORRECTION_FACTOR: [MessageHandler(TEXT_FILTER, ask_target_glucose)],
+        TARGET_GLUCOSE: [
+            CallbackQueryHandler(finish_onboarding, pattern='^target_'),
+            MessageHandler(TEXT_FILTER, finish_onboarding),
+        ],
     },
     fallbacks=[CommandHandler('cancelar', cancel)]
 )
 
 log_conv_handler = ConversationHandler(
-    entry_points=[CommandHandler('registrar', start_log)],
+    entry_points=[
+        CommandHandler('registrar', start_log),
+        CallbackQueryHandler(start_log, pattern='^cmd_registrar$'),
+    ],
     states={
-        GLUCOSE_STATE: [MessageHandler(text_or_voice, receive_glucose)],
-        FOOD_STATE: [MessageHandler(text_or_voice, receive_food)],
-        INSULIN_STATE: [MessageHandler(text_or_voice, receive_insulin)],
+        REG_GLUCOSE: [MessageHandler(TEXT_FILTER, receive_glucose)],
+        REG_FOOD_CHOICE: [CallbackQueryHandler(food_choice_callback)],
+        REG_FOOD_SEARCH: [MessageHandler(TEXT_FILTER, food_search)],
+        REG_FOOD_SELECT: [CallbackQueryHandler(food_select_callback)],
+        REG_FOOD_QTY: [MessageHandler(TEXT_FILTER, food_quantity)],
+        REG_FOOD_MORE: [CallbackQueryHandler(food_more_callback)],
+        REG_MOOD: [CallbackQueryHandler(mood_callback)],
+        REG_EXERCISE: [CallbackQueryHandler(exercise_callback)],
+        REG_INSULIN: [MessageHandler(TEXT_FILTER, receive_insulin)],
+        REG_SAVE_MEAL_CHOICE: [CallbackQueryHandler(save_meal_choice_callback)],
+        REG_SAVE_MEAL_NAME: [MessageHandler(TEXT_FILTER, save_meal_name)],
+        REG_MEAL_SELECT: [CallbackQueryHandler(meal_select_callback)],
     },
     fallbacks=[CommandHandler('cancelar', cancel)]
 )

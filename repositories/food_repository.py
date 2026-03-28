@@ -5,14 +5,11 @@ from database.supabase_client import supabase_db
 
 
 def search_food(query: str, limit: int = 5) -> List[Dict[str, Any]]:
-    """
-    Busca alimentos na tabela food_reference (TACO) por nome parcial (ilike).
-    Retorna os resultados mais relevantes.
-    """
+    """Busca alimentos na tabela food_reference (TACO) por nome parcial."""
     try:
         response = (
             supabase_db.table("food_reference")
-            .select("food_name, portion_size, unit, carbs_per_portion")
+            .select("id, food_name, portion_size, unit, carbs_per_portion")
             .ilike("food_name", f"%{query}%")
             .limit(limit)
             .execute()
@@ -23,19 +20,17 @@ def search_food(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         return []
 
 
-def get_food_by_name(food_name: str) -> Optional[Dict[str, Any]]:
-    """
-    Busca um alimento exato na tabela food_reference.
-    """
+def get_food_by_id(food_id: int) -> Optional[Dict[str, Any]]:
+    """Busca alimento por ID."""
     try:
         response = (
             supabase_db.table("food_reference")
-            .select("food_name, portion_size, unit, carbs_per_portion")
-            .ilike("food_name", food_name)
+            .select("id, food_name, portion_size, unit, carbs_per_portion")
+            .eq("id", food_id)
             .limit(1)
             .execute()
         )
         return response.data[0] if response.data else None
     except Exception as e:
-        logging.error(f"Erro ao buscar alimento por nome: {e}")
+        logging.error(f"Erro ao buscar alimento por id: {e}")
         return None

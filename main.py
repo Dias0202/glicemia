@@ -3,16 +3,14 @@ import logging
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 from core.config import TELEGRAM_TOKEN
 
 from handlers.telegram_handlers import (
     onboarding_conv_handler,
     log_conv_handler,
     start,
-    ajuda,
-    historico,
-    grafico,
+    menu_callback,
     buscar_alimento,
 )
 
@@ -23,7 +21,6 @@ logging.basicConfig(
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    """Servidor web minimalista para responder aos health checks do Render."""
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
@@ -35,32 +32,29 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
 
 def run_dummy_server():
-    """Inicializa o servidor HTTP na porta definida pelo Render."""
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    logging.info(f"Servidor de Health Check iniciado na porta {port}")
+    logging.info(f"Health Check na porta {port}")
     server.serve_forever()
 
 
 def main() -> None:
-    """Inicializa a aplicacao do bot do Telegram e o servidor web paralelo."""
-
     threading.Thread(target=run_dummy_server, daemon=True).start()
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Comandos simples
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('ajuda', ajuda))
-    application.add_handler(CommandHandler('historico', historico))
-    application.add_handler(CommandHandler('grafico', grafico))
-    application.add_handler(CommandHandler('buscar', buscar_alimento))
-
-    # Fluxos de conversacao (state machines)
+    # Fluxos de conversacao (devem ser adicionados primeiro para ter prioridade)
     application.add_handler(onboarding_conv_handler)
     application.add_handler(log_conv_handler)
 
-    logging.info("Inicializando o bot no modo Long Polling...")
+    # Comandos simples
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('buscar', buscar_alimento))
+
+    # Callbacks do menu principal (menor prioridade)
+    application.add_handler(CallbackQueryHandler(menu_callback, pattern='^cmd_(historico|grafico|ajuda|buscar|menu)$'))
+
+    logging.info("Inicializando bot...")
     application.run_polling(drop_pending_updates=True)
 
 

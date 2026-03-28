@@ -1,13 +1,19 @@
 # services/calculator_service.py
-import logging
 from typing import Dict
+
+# Fator de reducao de dose de insulina por intensidade de exercicio.
+# Exercicio aumenta sensibilidade a insulina -> necessidade menor de dose.
+EXERCISE_FACTORS = {
+    "nenhum": 1.0,
+    "leve": 0.90,       # caminhada, yoga -> reduz 10%
+    "moderado": 0.80,   # corrida leve, bike -> reduz 20%
+    "intenso": 0.70,    # crossfit, HIIT, musculacao pesada -> reduz 30%
+}
 
 
 def calculate_carb_bolus(carbs_ingested: float, insulin_carb_ratio: float) -> float:
     """
-    Calcula o bolus alimentar (cobertura de carboidratos).
-    Formula: dose = carboidratos / razao insulina-carboidrato (ICR)
-    Exemplo: 60g carbs / ICR 10 = 6 U
+    Bolus alimentar = carboidratos / ICR
     """
     if not carbs_ingested or carbs_ingested <= 0:
         return 0.0
@@ -22,10 +28,8 @@ def calculate_correction_dose(
     correction_factor: float
 ) -> float:
     """
-    Calcula a dose de correcao para trazer a glicemia ao alvo.
-    Formula: dose = (glicemia_atual - glicemia_alvo) / fator_de_correcao
-    So aplica se glicemia atual > alvo.
-    Exemplo: (250 - 120) / 50 = 2.6 U
+    Dose de correcao = (glicemia_atual - alvo) / fator_correcao
+    So aplica se glicemia > alvo.
     """
     if not current_glucose or not correction_factor or correction_factor <= 0:
         return 0.0
@@ -39,24 +43,28 @@ def calculate_total_dose(
     current_glucose: int,
     insulin_carb_ratio: float,
     correction_factor: float,
-    target_glucose: int = 120
+    target_glucose: int = 120,
+    exercise_intensity: str = "nenhum",
 ) -> Dict[str, float]:
     """
     Calcula a dose total de insulina rapida recomendada.
-    Retorna um dicionario detalhado com cada componente do calculo.
-
-    Componentes:
-      - bolus_alimentar: cobertura dos carboidratos ingeridos
-      - dose_correcao: correcao da hiperglicemia (se acima do alvo)
-      - dose_total: soma dos dois componentes
+    Aplica reducao pelo fator de exercicio se aplicavel.
     """
     bolus = calculate_carb_bolus(carbs_ingested, insulin_carb_ratio)
     correction = calculate_correction_dose(current_glucose, target_glucose, correction_factor)
-    total = round(bolus + correction, 2)
+    subtotal = round(bolus + correction, 2)
+
+    ex_factor = EXERCISE_FACTORS.get(exercise_intensity, 1.0)
+    total = round(subtotal * ex_factor, 2)
+    reduction = round(subtotal - total, 2)
 
     return {
         "bolus_alimentar": bolus,
         "dose_correcao": correction,
+        "subtotal": subtotal,
+        "exercise_intensity": exercise_intensity,
+        "exercise_factor": ex_factor,
+        "exercise_reduction": reduction,
         "dose_total": total,
         "carbs_ingested": carbs_ingested or 0.0,
         "current_glucose": current_glucose or 0,
