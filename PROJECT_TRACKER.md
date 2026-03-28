@@ -5,6 +5,7 @@
 - **Linguagem:** Python 3.10+
 - **Banco de Dados:** Supabase (PostgreSQL)
 - **IA/NLP:** Groq API (llama-3.1-8b-instant)
+- **Voz/STT:** Groq Whisper (whisper-large-v3-turbo)
 - **Visualizacao:** Matplotlib
 - **Infraestrutura:** Render (Web Service + health check)
 
@@ -27,18 +28,19 @@
 - [X] `core/config.py` - Carregamento e validacao de variaveis de ambiente
 - [X] `database/supabase_client.py` - Cliente Supabase global
 - [X] `repositories/logs_repository.py` - Insercao e consulta de logs glicemicos
-- [X] `repositories/user_repository.py` - CRUD de perfil e calculo de IMC
+- [X] `repositories/user_repository.py` - CRUD de perfil, IMC, parametros clinicos
 - [X] `repositories/food_repository.py` - Busca de alimentos na tabela TACO
 - [X] `services/nlp_service.py` - Extracao de dados via Groq API
-- [X] `services/calculator_service.py` - Calculo de insulina bolus
+- [X] `services/calculator_service.py` - Calculo clinico: bolus alimentar + dose de correcao
 - [X] `services/chart_service.py` - Geracao de graficos glicemicos (matplotlib)
-- [X] `handlers/telegram_handlers.py` - State machines (onboarding + log diario + comandos)
+- [X] `services/voice_service.py` - Transcricao de voz via Groq Whisper API
+- [X] `handlers/telegram_handlers.py` - State machines com suporte a texto e voz
 - [X] `main.py` - Integracao de todos os handlers e health check
 
 ### [X] Fase 3: Comandos do Bot
 - [X] `/start` - Mensagem de boas-vindas
-- [X] `/perfil` - Onboarding de perfil clinico
-- [X] `/registrar` - Registro diario (glicemia + refeicao NLP + insulina)
+- [X] `/perfil` - Onboarding clinico (ICR, fator de correcao, glicemia alvo)
+- [X] `/registrar` - Registro com calculo de dose (bolus + correcao) via texto ou voz
 - [X] `/historico` - Ultimos 10 registros
 - [X] `/grafico` - Grafico de tendencia dos ultimos 7 dias
 - [X] `/buscar <alimento>` - Busca na tabela TACO
@@ -51,17 +53,34 @@
 - [X] Variaveis de ambiente configuradas no Render
 - [X] Health check server na porta PORT (default: 10000)
 
-### [X] Fase 5: Testes e Documentacao
-- [X] Testes unitarios com pytest (27 testes)
-- [X] Mocks para Supabase e Groq (testes rodam sem credenciais)
-- [X] README.md completo
+### [X] Fase 5: Calculo Clinico de Insulina
+- [X] Perfil do usuario armazena ICR, fator de correcao e glicemia alvo
+- [X] Bolus alimentar: carboidratos / ICR
+- [X] Dose de correcao: (glicemia - alvo) / fator de correcao
+- [X] Dose total = bolus + correcao
+- [X] Alertas de hipoglicemia (<70) e hiperglicemia severa (>250)
+- [X] Feedback de diferenca entre dose sugerida e aplicada
+
+### [X] Fase 6: Entrada por Voz
+- [X] Transcricao de audio via Groq Whisper (whisper-large-v3-turbo, pt-BR)
+- [X] Suporte a voz em todas as etapas do onboarding e registro
+- [X] Filtro combinado texto + voz nos ConversationHandlers
+
+### [X] Fase 7: Testes e Documentacao
+- [X] Testes unitarios com pytest (42 testes)
+- [X] Mocks para Supabase, Groq e Whisper (testes rodam sem credenciais)
+- [X] README.md completo com DDL, formulas clinicas e fluxo de uso
 - [X] .env.example
 - [X] PROJECT_TRACKER.md atualizado
 
 ## Log de Erros e Resolucoes
 - **[2026-03-15] Erro Groq 400 (model_decommissioned):** Modelo `llama3-8b-8192` descontinuado.
   - *Resolucao:* Atualizado para `llama-3.1-8b-instant` em `services/nlp_service.py`.
-- **[2026-03-27] Bug: telegram_user_id ausente nos logs:** Funcao `insert_glycemic_log` nao recebia `telegram_user_id`, quebrando vinculo usuario-log.
+- **[2026-03-27] Bug: telegram_user_id ausente nos logs:** Funcao `insert_glycemic_log` nao recebia `telegram_user_id`.
   - *Resolucao:* Adicionado parametro obrigatorio `telegram_user_id` em `repositories/logs_repository.py`.
-- **[2026-03-27] Path hardcoded no ingest_taco.py:** Caminho absoluto Windows impedia execucao em outros ambientes.
-  - *Resolucao:* Substituido por path relativo via `os.path` em `scripts/ingest_taco.py`.
+- **[2026-03-27] Path hardcoded no ingest_taco.py:** Caminho absoluto Windows.
+  - *Resolucao:* Substituido por path relativo via `os.path`.
+- **[2026-03-27] RLS bloqueando operacoes:** Supabase Row Level Security bloqueava inserts.
+  - *Resolucao:* Desabilitar RLS ou criar policies permissivas.
+- **[2026-03-28] Refatoracao clinica:** CARB_FACTOR global substituido por ICR/FC/alvo por usuario.
+  - *Resolucao:* Novos campos em user_profiles, calculator_service reescrito com formula clinica.
