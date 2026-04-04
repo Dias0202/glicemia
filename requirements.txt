@@ -5,3 +5,6 @@ python-dotenv==1.0.1
 pandas==2.2.1
 matplotlib==3.8.3
 pytest>=8.0.0
+cryptography>=42.0.0
+numpy>=1.26.0
+pylibrelinkup>=0.7.0

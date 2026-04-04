@@ -14,10 +14,17 @@ def insert_glycemic_log(
     exercise_intensity: Optional[str] = None,
     mood: Optional[str] = None,
     refeicao: str = "Não especificada",
-    timestamp: Optional[str] = None
+    timestamp: Optional[str] = None,
+    source_type: str = "MANUAL",
+    trend_arrow: Optional[str] = None,
+    predicted_glucose_60m: Optional[int] = None,
+    ai_recommendation: Optional[str] = None,
+    heart_rate_bpm: Optional[int] = None,
+    is_synthetic: bool = False,
 ) -> Dict[str, Any]:
     """
     Insere um novo registro na tabela glycemic_logs no Supabase.
+    Suporta campos expandidos para dados CGM e predicoes de IA.
     """
     if not timestamp:
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -32,7 +39,13 @@ def insert_glycemic_log(
         "exercise_done": exercise_done,
         "exercise_intensity": exercise_intensity,
         "mood": mood,
-        "refeicao": refeicao
+        "refeicao": refeicao,
+        "source_type": source_type,
+        "trend_arrow": trend_arrow,
+        "predicted_glucose_60m": predicted_glucose_60m,
+        "ai_recommendation": ai_recommendation,
+        "heart_rate_bpm": heart_rate_bpm,
+        "is_synthetic": is_synthetic,
     }
 
     data_to_insert = {k: v for k, v in data.items() if v is not None}
